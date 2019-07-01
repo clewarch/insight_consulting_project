@@ -1,0 +1,281 @@
+---
+title: "Implementation of a Random Forest Classifier on Two Feature Sets"
+author: "CLL"
+date: "6/24/2019"
+output: html_document
+---
+
+Purpose: Compare the performance of two binary categorical feature sets in classifying observations from two labeled groups.
+
+Modify filepath, dataframes, and feature names in the following code block:
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#SET UP ENVIRONMENT-- change directory and file names as appropriate
+
+#required packages
+require(ggplot2)
+require(dplyr)
+require(tidyr)
+require(forcats)
+require(stringr)
+require(randomForest)
+require(pROC)
+
+#working directory and data
+setwd("yourfilepathhere")
+
+#read in your files appropriately-- check that everything is formatted as 0/1 for the features and group1/group2 for the output variable "category"
+#you can either read this in from a .csv file or generate the dataframe earlier in the script
+
+your.dataframe.1<-read.csv("featureset1.csv")
+your.dataframe.2<-read.csv("featureset2.csv")
+
+featureset1.name<-"Placeholder Name: Feature Set 1" #this will be used for plots later, so fill in the placeholder name with something appropriate
+featureset2.name<-"Placeholder Name: Feature Set 2" #this will be used for plots later, so fill in the placeholder name with something appropriate
+
+#NOTE: if you have a character string ID for a given observation, be sure to make it the rowname instead!  All your features, with the exception of category, should be numeric 0/1.
+rownames(your.dataframe.1)<-your.dataframe.1$id
+rownames(your.dataframe.2)<-your.dataframe.2$id
+
+your.dataframe.1<-select(your.dataframe.1, -id)
+your.dataframe.2<-select(your.dataframe.2, -id)
+```
+
+
+#Evaluate Feature Set 1------------------------------------------------------------------------------------------------------------------------
+
+This first code chunk takes a dataframe (your.dataframe.1) with binary categorical features (encoded as 0/1) and one output variable, category (encoded as group1/group2), and implements a random forest classifier using this data.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#set seed so we'll pull the same random rows across datasets
+set.seed(100)
+
+focal.data<-your.dataframe.1
+focal.data.name<-featureset1.name
+
+
+#check frequencies of variables in the dataset-- we'll use this for evaluating our model later
+focal.data.variable.frequencies<-select(focal.data, -category)#needs to be numeric for colSums
+focal.data.variable.frequencies<-as.data.frame(colSums(focal.data.variable.frequencies))#how often do we see each variable in this dataset
+names(focal.data.variable.frequencies)[1]<-"frequency"
+focal.data.variable.frequencies$variable<-row.names(focal.data.variable.frequencies)#add variable names for joining with model importance
+
+#prints range, median, etc for variables in this dataset
+summary(focal.data.variable.frequencies)
+
+#TRAIN/TEST SPLIT---------------------------------------------------------------------------------------------------------------------------------------------
+#split this into test and train sets: 70% train and 30%test
+train <- sample(nrow(focal.data), 0.7*nrow(focal.data), replace = FALSE)
+TrainSet <- focal.data[train,]
+ValidSet <- focal.data[-train,]
+
+
+#DOWNSAMPLE TRAINING SET TO BALANCE CLASSES-------------------------------------------------------------------------------------------------------------------
+#within training set, downsample group1/more frequent variable to equal size of group2/the less frequent variable
+
+#split late and early samples
+group1.category.train<-filter(TrainSet, category=="group1")
+group2.category.train<-filter(TrainSet, category=="group2")
+
+#randomly downsample group1 patients to match number of group2 patients
+balance.group1<- sample(nrow(group1.category.train),dim(group2.category.train)[1], replace = FALSE)
+group1.reduced.rows<-group1.category.train[balance.group1,]
+
+#combine group2 and downsampled group1 rows
+balanced.TrainSet<-rbind(group2.category.train, group1.reduced.rows)
+
+
+#RANDOM FOREST PREDICTING CATEGORY WITH BALANCED DATASET-----------------------------------------------------------------------------------------------------------
+# Create a Random Forest model with default parameters
+model <- randomForest(category ~ ., data = balanced.TrainSet, importance = TRUE)
+#note: this takes ~2-3 min to run
+
+
+
+#EVALUATE MODEL: OOB Error--------------------------------------------------------------------------------------------------------------------------------------
+model
+#
+
+
+#EVALUATE MODEL: Performance on training set-----------------------------------------------------------------------------------------------------------------------
+# Predicting on train set
+predTrain.bal <- predict(model, balanced.TrainSet, type = "class")
+
+#EVALUATE MODEL: Performance on validation set-----------------------------------------------------------------------------------------------------------------------
+# Predicting on Validation set
+predValid <- predict(model, ValidSet, type = "class")
+
+#EVALUATE VARIABLES: based on random forest estimated importances and frequencies-----------------------------------------------------------------------------------
+#grab importances from model
+variable.importance<-as.data.frame(importance(model))
+variable.importance$variable<-rownames(variable.importance)
+#join with frequency data
+variable.importance.frequency<-full_join(variable.importance, focal.data.variable.frequencies, by="variable")
+
+
+
+#Optional-- uncomment to plot a few relevant measurements
+
+#How often do we see individual variables in this model?
+#ggplot(variable.importance.frequency, aes(x=frequency))+geom_histogram(color="black", fill="white")+theme_classic()+labs(y="Number of Features", x="Number of Observations", title=paste("Variable Frequency in Model with", focal.data.name))
+
+#How important are individual features based on the random forest estimates?
+#ggplot(variable.importance.frequency, aes(x=MeanDecreaseAccuracy))+geom_histogram(color="black", fill="white")+theme_classic()+labs(y="Number of Features", x="Mean Decrease in Accuracy", title=paste("Variable Importance in Model with", focal.data.name))
+
+#Relationship between feature importance and feature frequency in this dataset:
+#ggplot(variable.importance.frequency, aes(x=frequency, y=MeanDecreaseAccuracy))+geom_point(alpha=0.5)+theme_classic()+labs(y="Mean Decrease in Accuracy", x="Number of Observations", title=paste("Estimated Importance,", focal.data.name))
+
+#save for this model so we can compare to other models---------------------------------------------------------------------------------------------------------------------------------------------------
+model.featureset1<-model
+valpred.featureset1<-data.frame(predValid, ValidSet$category)
+names(valpred.featureset1)<-c("model.predictions", "validation.labels")
+variable.importance.featureset1<-variable.importance.frequency
+
+```
+
+#Performance of Feature Set 1
+
+Accuracy on Validation Data: `r 100*mean(valpred.featureset1$model.predictions == valpred.featureset1$validation.labels)`
+
+Confusion Matrix:
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+with(featureset1, table(model.predictions, validation.labels))
+```
+
+AUC:
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+roc.featureset1<-roc(as.numeric(valpred.featureset1$validation.labels), as.numeric(valpred.featureset1$model.predictions))
+auc(roc.featureset1)
+```
+
+
+#Evaluate Feature Set 2-----------------------------------------------------------------------------------------------------------------------
+
+This second code chunk takes a dataframe (your.dataframe.2) with binary categorical features (encoded as 0/1) and one output variable, category (encoded as group1/group2), and implements a random forest classifier using this data-- just like we did for the first feature set earlier.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#set seed so we'll pull the same random rows across datasets
+set.seed(100)
+
+focal.data<-your.dataframe.2
+focal.data.name<-featureset2.name
+
+
+#check frequencies of variables in the dataset-- we'll use this for evaluating our model later
+focal.data.variable.frequencies<-select(focal.data, -category)#needs to be numeric for colSums
+focal.data.variable.frequencies<-as.data.frame(colSums(focal.data.variable.frequencies))#how often do we see each variable in this dataset
+names(focal.data.variable.frequencies)[1]<-"frequency"
+focal.data.variable.frequencies$variable<-row.names(focal.data.variable.frequencies)#add variable names for joining with model importance
+
+#prints range, median, etc for variables in this dataset
+summary(focal.data.variable.frequencies)
+
+#TRAIN/TEST SPLIT---------------------------------------------------------------------------------------------------------------------------------------------
+#split this into test and train sets: 70% train and 30%test
+train <- sample(nrow(focal.data), 0.7*nrow(focal.data), replace = FALSE)
+TrainSet <- focal.data[train,]
+ValidSet <- focal.data[-train,]
+
+
+#DOWNSAMPLE TRAINING SET TO BALANCE CLASSES-------------------------------------------------------------------------------------------------------------------
+#within training set, downsample group1/more frequent variable to equal size of group2/the less frequent variable
+
+#split late and early samples
+group1.category.train<-filter(TrainSet, category=="group1")
+group2.category.train<-filter(TrainSet, category=="group2")
+
+#randomly downsample group1 patients to match number of group2 patients
+balance.group1<- sample(nrow(group1.category.train),dim(group2.category.train)[1], replace = FALSE)
+group1.reduced.rows<-group1.category.train[balance.group1,]
+
+#combine group2 and downsampled group1 rows
+balanced.TrainSet<-rbind(group2.category.train, group1.reduced.rows)
+
+
+#RANDOM FOREST PREDICTING CATEGORY WITH BALANCED DATASET-----------------------------------------------------------------------------------------------------------
+# Create a Random Forest model with default parameters
+model <- randomForest(category ~ ., data = balanced.TrainSet, importance = TRUE)
+#note: this takes ~2-3 min to run
+
+
+
+#EVALUATE MODEL: OOB Error--------------------------------------------------------------------------------------------------------------------------------------
+model
+#
+
+
+#EVALUATE MODEL: Performance on training set-----------------------------------------------------------------------------------------------------------------------
+# Predicting on train set
+predTrain.bal <- predict(model, balanced.TrainSet, type = "class")
+#
+
+#EVALUATE MODEL: Performance on validation set-----------------------------------------------------------------------------------------------------------------------
+# Predicting on Validation set
+predValid <- predict(model, ValidSet, type = "class")
+#
+
+#EVALUATE VARIABLES: based on random forest estimated importances and frequencies-----------------------------------------------------------------------------------
+#grab importances from model
+variable.importance<-as.data.frame(importance(model))
+variable.importance$variable<-rownames(variable.importance)
+#join with frequency data
+variable.importance.frequency<-full_join(variable.importance, focal.data.variable.frequencies, by="variable")
+
+
+
+#Optional: Uncomment to plot a few relevant measurements
+
+#How often do we see individual variables in this model?
+#ggplot(variable.importance.frequency, aes(x=frequency))+geom_histogram(color="black", fill="white")+theme_classic()+labs(y="Number of Features", x="Number of Observations", title=paste("Variable Frequency in Model with", focal.data.name))
+
+#How important are individual features based on the random forest estimates?
+#ggplot(variable.importance.frequency, aes(x=MeanDecreaseAccuracy))+geom_histogram(color="black", fill="white")+theme_classic()+labs(y="Number of Features", x="Mean Decrease in Accuracy", title=paste("Variable Importance in Model with", focal.data.name))
+
+#Relationship between feature importance and feature frequency in this dataset:
+#ggplot(variable.importance.frequency, aes(x=frequency, y=MeanDecreaseAccuracy))+geom_point(alpha=0.5)+theme_classic()+labs(y="Mean Decrease in Accuracy", x="Number of Observations", title=paste("Estimated Importance,", focal.data.name))
+
+#save for this model so we can compare to other models---------------------------------------------------------------------------------------------------------------------------------------------------
+model.featureset2<-model
+valpred.featureset2<-data.frame(predValid, ValidSet$category)
+names(valpred.featureset2)<-c("model.predictions", "validation.labels")
+variable.importance.featureset2<-variable.importance.frequency
+
+```
+
+#Performance of Feature Set 2
+
+Accuracy on Validation Data: `r 100*mean(valpred.featureset2$model.predictions == valpred.featureset2$validation.labels)`
+
+Confusion Matrix:
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+with(featureset2, table(model.predictions, validation.labels))
+```
+
+AUC:
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+roc.featureset2<-roc(as.numeric(valpred.featureset2$validation.labels), as.numeric(valpred.featureset2$model.predictions))
+auc(roc.featureset2)
+```
+
+
+#Compare Feature Importance and Frequency in Two Models-------------------------------------------------------------------------------------------------------
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+variable.importance.featureset1<-mutate(variable.importance.featureset1, model="featureset.1")
+variable.importance.featureset2<-mutate(variable.importance.featureset2, model="featureset.2")
+
+compare.models<-rbind(variable.importance.featureset1, variable.importance.featureset2)
+
+
+#How often do we see variables in the two models? (median and interquartile ranges)
+ggplot(compare.models, aes(x=model, y=frequency))+stat_summary(fun.ymin = function(z) { quantile(z,0.25) },fun.ymax = function(z) { quantile(z,0.75) },fun.y = median)+theme_classic()+labs(title="Median and Interquartile Ranges of Variable Frequencies", x="Model", y="Median Number of Observations per Variable")
+
+#How important are individual variables in the two models? (median and interquartile ranges)
+ggplot(compare.models, aes(x=model, y=MeanDecreaseAccuracy))+stat_summary(fun.ymin = function(z) { quantile(z,0.25) },fun.ymax = function(z) { quantile(z,0.75) },fun.y = median)+theme_classic()+labs(title="Median and Interquartile Ranges of Mean Decrease in Accuracy", x="Model", y="Median Variable Importances by Model")
+
+#Frequency vs. importance, colored by model
+ggplot(compare.models, aes(x=frequency, y=MeanDecreaseAccuracy, color=model))+geom_point(alpha=0.5)+theme_classic()+labs(y="Mean Decrease in Accuracy", x="Number of Observations", title=paste("Estimated Importance by Model, Frequency"))+facet_wrap(~model)
+
+```
